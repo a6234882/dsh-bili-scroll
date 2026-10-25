@@ -55,6 +55,7 @@ def to_url(target: str) -> str:
     return t
 
 
+# [patch-asr v2 backup_url]
 def _fetch_audio_bili_api(url: str, tmp: str, tag: str) -> str:
     """[本机补丁] 用已登录的 bilibili_api 取 DASH 音频流并下载。
 

@@ -14,7 +14,7 @@
  * 幂等：已经补过的文件里有 _fetch_audio_bili_api 标记，直接跳过。
  * 用法：node patch-asr.mjs [--dry] [--force]
  */
-import { readFileSync, readdirSync, writeFileSync, existsSync } from 'node:fs'
+import { readFileSync, readdirSync, writeFileSync, existsSync, copyFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { homedir } from 'node:os'
@@ -22,11 +22,17 @@ import { homedir } from 'node:os'
 const HERE = dirname(fileURLToPath(import.meta.url))
 const DRY = process.argv.includes('--dry')
 const FORCE = process.argv.includes('--force')
+// 干净的上游 asr.py（用于"把旧补丁重置回原样再重打"）。仓库里就是 lib/asr.py 的上游版本：
+//   优先用仓库里的 git 版本；找不到就让用户手动准备 —— 绝不拿"已打过补丁的文件"当原件。
+const UPSTREAM_SNAPSHOT = process.env.BILI_ASR_UPSTREAM || join(HERE, 'asr.upstream.py')
 
 // 家目录：插件家 = ~/.dsh/bili-duty；若本脚本被复制到别处，允许环境变量覆盖
 const HOME_DIR = process.env.BILI_DUTY_HOME || join(homedir(), '.dsh', 'bili-duty')
 
 const MARK = '_fetch_audio_bili_api'
+// ⭐ 版本戳：光看 MARK 会把"老补丁"也当成"已补过" ⇒ 补丁内容升级后无法覆盖到已补过的文件。
+//   2026-10-25 踩过：加了 backup_url 重试后，两个旧补丁文件被判定"已补过"跳过，实际还是旧逻辑。
+const MARK_VER = '# [patch-asr v2 backup_url]'
 const ANCHOR = 'def fetch_audio(url: str, tmp: str, tag: str) -> str:'
 
 /** preinstall 里的 runner：调本脚本；补丁失败绝不让安装失败 */
@@ -56,7 +62,8 @@ function upstreamAsr() {
   return existsSync(p) ? p : null
 }
 
-const NEW_FETCH = `def _fetch_audio_bili_api(url: str, tmp: str, tag: str) -> str:
+const NEW_FETCH = `${MARK_VER}
+def _fetch_audio_bili_api(url: str, tmp: str, tag: str) -> str:
     """[本机补丁] 用已登录的 bilibili_api 取 DASH 音频流并下载。
 
     为什么不再依赖 yt-dlp：2026-10-22 起 B站 把网页里的 window.__INITIAL_STATE__
@@ -245,7 +252,19 @@ const NEW_TRANSCRIBE = `        # [本机补丁] 显式解码成 16k 单声道�
 function patchOne(file) {
   if (!existsSync(file)) return { file, skipped: '不存在' }
   let s = readFileSync(file, 'utf8')
-  if (s.includes(MARK) && !FORCE) return { file, skipped: '已补过' }
+  // 已是最新版才跳过；老补丁（只有 MARK 没有 MARK_VER）要重打 ⇒ 先还原成上游再补
+  if (s.includes(MARK) && s.includes(MARK_VER) && !FORCE) return { file, skipped: '已补过（最新版）' }
+  if (s.includes(MARK) && !s.includes(MARK_VER)) {
+    // 老补丁：用包内干净的上游副本覆盖回去，再走一遍完整补丁流程
+    const clean = UPSTREAM_SNAPSHOT
+    if (clean && existsSync(clean)) {
+      copyFileSync(clean, file)
+      s = readFileSync(file, 'utf8')
+      console.log(`[patch-asr] ${file} 是旧版补丁，已用上游原件重置后重打`)
+    } else {
+      return { file, skipped: '是旧版补丁，但找不到上游原件可重置（请手动从 git 取 lib/asr.py 再跑）' }
+    }
+  }
 
   let changed = false
   // ① 换 fetch_audio
